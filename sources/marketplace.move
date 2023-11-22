@@ -3,6 +3,7 @@ module marketplace::marketplace {
     use std::signer;
     use std::string::String;
     use std::vector;
+    use std::option::{Self, Option};
     
     use aptos_std::table::{Self, Table};
 
@@ -15,6 +16,7 @@ module marketplace::marketplace {
     use aptos_token::token::{Self, Token, TokenId};
 
     const ENOT_OWNER: u64 = 0;
+    const EINVALID_SELLER_ADDRESS: u64 = 1;
 
     struct MarketCap has key {
         cap: SignerCapability,
@@ -36,7 +38,7 @@ module marketplace::marketplace {
 
     struct ListedItem has store {
         listing_id: u64,
-        token: Token,
+        token: Option<Token>,
         seller: address,
         price: u64,
         timestamp: u64,
@@ -48,7 +50,6 @@ module marketplace::marketplace {
         seller: address,
         price: u64,
         timestamp: u64,
-        
     }
 
     struct BuyEvent has store, drop {
@@ -123,5 +124,61 @@ module marketplace::marketplace {
         assert!(marketplace_data.owner == signer::address_of(account), ENOT_OWNER);
 
         marketplace_data.fund_address = treasury_address;
+    }
+
+    public entry fun list_token(account: &signer, creator: address, collection_name: String, token_name: String, property_version: u64, price: u64) acquires MarketCap, ListTokenData {
+        let marketplace_signer_cap = borrow_global<MarketCap>(@marketplace);
+
+        let marketplace_signer = account::create_signer_with_capability(&marketplace_signer_cap.cap);
+        let marketplace_resource_account = signer::address_of(&marketplace_signer);
+
+        let list_token_data = borrow_global_mut<ListTokenData>(marketplace_resource_account);
+
+        let token_id = token::create_token_id_raw(creator, collection_name, token_name, property_version);
+        let token = token::withdraw_token(account, token_id, 1);
+
+        let guid = account::create_guid(&marketplace_signer);
+        let listing_id = guid::creation_num(&guid);
+
+        event::emit_event<ListEvent>(&mut list_token_data.list_token_event, ListEvent {
+            listing_id,
+            id: token_id,
+            seller: signer::address_of(account),
+            price,
+            timestamp: timestamp::now_seconds(),
+        });
+
+        table::add(&mut list_token_data.listed_token, token_id, ListedItem {
+            listing_id,
+            token: option::some(token),
+            seller: signer::address_of(account),
+            price,
+            timestamp: timestamp::now_seconds(),
+        })
+    }
+
+    public entry fun delist_token(account: &signer, creator: address, collection_name: String, token_name: String, property_version: u64) acquires MarketCap, ListTokenData {
+        let marketplace_resource_account = get_marketplace_resource_account();
+        let addr = signer::address_of(account);
+
+        let list_token_data = borrow_global_mut<ListTokenData>(marketplace_resource_account);
+        
+        let token_id = token::create_token_id_raw(creator, collection_name, token_name, property_version);
+        let token_data = table::borrow_mut(&mut list_token_data.listed_token, token_id);
+
+        assert!(token_data.seller == addr, EINVALID_SELLER_ADDRESS);
+
+        event::emit_event<DelistEvent>(&mut list_token_data.delist_token_event, DelistEvent {
+            listing_id: token_data.listing_id,
+            id: token_id,
+            seller: token_data.seller,
+            price: token_data.price,
+            timestamp: timestamp::now_seconds(),
+        });
+
+        let token = option::extract(&mut token_data.token);
+        token::deposit_token(account, token);
+        let ListedItem { listing_id: _, token, seller: _, price: _, timestamp: _} = table::remove(&mut list_token_data.listed_token, token_id);
+        option::destroy_none(token)
     }
 }
