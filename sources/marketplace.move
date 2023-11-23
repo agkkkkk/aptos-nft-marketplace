@@ -12,11 +12,13 @@ module marketplace::marketplace {
     use aptos_framework::event::{Self, EventHandle};
     use aptos_framework::guid;
     use aptos_framework::timestamp;
+    use aptos_framework::coin;
 
     use aptos_token::token::{Self, Token, TokenId};
 
     const ENOT_OWNER: u64 = 0;
     const EINVALID_SELLER_ADDRESS: u64 = 1;
+    const ETOKEN_SELLER_AND_BUYER_CANNOT_BE_SAME: u64 = 2;
 
     struct MarketCap has key {
         cap: SignerCapability,
@@ -78,7 +80,6 @@ module marketplace::marketplace {
 
     fun init_module(account: &signer) {
         let (resource_account_signer, resource_account_signer_cap) = account::create_resource_account(account, x"01");
-        let resource_account_address = signer::address_of(&resource_account_signer);
 
         move_to(account, MarketCap {
             cap: resource_account_signer_cap,
@@ -180,5 +181,54 @@ module marketplace::marketplace {
         token::deposit_token(account, token);
         let ListedItem { listing_id: _, token, seller: _, price: _, timestamp: _} = table::remove(&mut list_token_data.listed_token, token_id);
         option::destroy_none(token)
+    }
+
+    public entry fun buy_token(account: &signer, creator: address, collection_name: String, token_name: String, property_version: u64) acquires MarketCap, Marketplace, ListTokenData {
+        let marketplace_resource_account = get_marketplace_resource_account();
+        let addr = signer::address_of(account);
+
+        let list_token_data = borrow_global_mut<ListTokenData>(marketplace_resource_account);
+
+        let token_id = token::create_token_id_raw(creator, collection_name, token_name, property_version);
+        let token_data = table::borrow_mut(&mut list_token_data.listed_token, token_id);
+
+        assert!(token_data.seller != addr, ETOKEN_SELLER_AND_BUYER_CANNOT_BE_SAME);
+
+        let royalty = token::get_royalty(token_id);
+        let royalty_address = token::get_royalty_payee(&royalty);
+        let royalty_numerator = token::get_royalty_numerator(&royalty);
+        let royalty_denominator = token::get_royalty_denominator(&royalty);
+
+        let marketplace_data = borrow_global<Marketplace>(marketplace_resource_account);
+
+        let fee = token_data.price * marketplace_data.fee / 10000;
+        let royalty_fee: u64 = 0;
+
+        if (royalty_denominator > 0) {
+            royalty_fee = token_data.price * royalty_numerator / royalty_denominator;
+        };
+
+        if (fee > 0) {
+            coin::transfer<AptosCoin>(account, marketplace_data.fund_address, fee);
+        };
+        if (royalty_fee > 0) {
+            coin::transfer<AptosCoin>(account, royalty_address, royalty_fee);
+        };
+
+        let seller_amount = token_data.price - fee - royalty_fee;
+        coin::transfer<AptosCoin>(account, token_data.seller, seller_amount);
+
+        event::emit_event<BuyEvent>(&mut list_token_data.buy_token_event, BuyEvent {
+            listing_id: token_data.listing_id,
+            id: token_id,
+            seller: token_data.seller,
+            buyer: addr,
+            timestamp: timestamp::now_seconds(),
+        });
+
+        let token = option::extract(&mut token_data.token);
+        token::deposit_token(account, token);
+        let ListedItem { listing_id: _, token, seller: _, price: _, timestamp: _} = table::remove(&mut list_token_data.listed_token, token_id);
+        option::destroy_none(token);
     }
 }
