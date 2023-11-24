@@ -19,6 +19,7 @@ module marketplace::marketplace {
     const ENOT_OWNER: u64 = 0;
     const EINVALID_SELLER_ADDRESS: u64 = 1;
     const ETOKEN_SELLER_AND_BUYER_CANNOT_BE_SAME: u64 = 2;
+    const EVECTOR_LENGTH_MISMATCH: u64 = 3;
 
     struct MarketCap has key {
         cap: SignerCapability,
@@ -78,6 +79,42 @@ module marketplace::marketplace {
         timestamp: u64,
     }
 
+    // struct Auction has key {
+    //     auction: Table<TokenId, AuctionItem>,
+    //     auction_event: EventHandle<AuctionEvent>,
+    //     bid_event: EventHandle<BidEvent>,
+    // }
+
+    // struct AuctionItem has store, drop {
+    //     min_sell_price: u64,
+    //     auction_id: u64,
+    //     token_owner: address,
+    //     timestamp: u64,
+    //     duration: u64,
+    //     starts_at: u64,
+    //     bidder_addresses: vector<address>,
+    //     highest_bidder: address,
+    //     bid_amounts: Table<address, u64>
+    // }
+
+    // struct AuctionEvent has store, drop {
+    //     token: TokenId,
+    //     auction_id: u64,
+    //     token_owner: address,
+    //     timestamp: u64,
+    //     starts_at: u64,
+    //     owner: address,
+    // }
+
+    // struct BidEvent has store, drop {
+    //     token: TokenId,
+    //     auction_id: u64,
+    //     timestamp: u64,
+    //     bid_amount: u64,
+    //     bidder: address,
+        
+    // }
+
     fun init_module(account: &signer) {
         let (resource_account_signer, resource_account_signer_cap) = account::create_resource_account(account, x"01");
 
@@ -127,7 +164,7 @@ module marketplace::marketplace {
         marketplace_data.fund_address = treasury_address;
     }
 
-    public entry fun list_token(account: &signer, creator: address, collection_name: String, token_name: String, property_version: u64, price: u64) acquires MarketCap, ListTokenData {
+    fun list_token(account: &signer, token_id: TokenId, price: u64) acquires MarketCap, ListTokenData {
         let marketplace_signer_cap = borrow_global<MarketCap>(@marketplace);
 
         let marketplace_signer = account::create_signer_with_capability(&marketplace_signer_cap.cap);
@@ -135,36 +172,65 @@ module marketplace::marketplace {
 
         let list_token_data = borrow_global_mut<ListTokenData>(marketplace_resource_account);
 
-        let token_id = token::create_token_id_raw(creator, collection_name, token_name, property_version);
         let token = token::withdraw_token(account, token_id, 1);
 
         let guid = account::create_guid(&marketplace_signer);
         let listing_id = guid::creation_num(&guid);
 
-        event::emit_event<ListEvent>(&mut list_token_data.list_token_event, ListEvent {
-            listing_id,
-            id: token_id,
-            seller: signer::address_of(account),
-            price,
-            timestamp: timestamp::now_seconds(),
-        });
+        let listed_time = timestamp::now_seconds();
 
         table::add(&mut list_token_data.listed_token, token_id, ListedItem {
             listing_id,
             token: option::some(token),
             seller: signer::address_of(account),
             price,
-            timestamp: timestamp::now_seconds(),
-        })
+            timestamp: listed_time,
+        });
+
+        event::emit_event<ListEvent>(&mut list_token_data.list_token_event, ListEvent {
+            listing_id,
+            id: token_id,
+            seller: signer::address_of(account),
+            price,
+            timestamp: listed_time,
+        });
     }
 
-    public entry fun delist_token(account: &signer, creator: address, collection_name: String, token_name: String, property_version: u64) acquires MarketCap, ListTokenData {
+    public entry fun batch_list_tokens(
+        account: &signer,
+        creators: vector<address>,
+        collection_names: vector<String>,
+        token_names: vector<String>,
+        property_versions: vector<u64>,
+        prices: vector<u64>
+    ) acquires MarketCap, ListTokenData {
+        assert!(
+            (vector::length(&creators) == vector::length(&collection_names)) &&
+            (vector::length(&collection_names) == vector::length(&token_names)) && 
+            (vector::length(&token_names) == vector::length(&property_versions)) &&
+            (vector::length(&property_versions) == vector::length(&prices)),
+            EVECTOR_LENGTH_MISMATCH
+        );
+
+        while (!vector::is_empty(&creators)) {
+            let creator = vector::pop_back(&mut creators);
+            let collection_name = vector::pop_back(&mut collection_names);
+            let token_name = vector::pop_back(&mut token_names);
+            let property_version = vector::pop_back(&mut property_versions);
+            let price = vector::pop_back(&mut prices);
+
+            let token_id = token::create_token_id_raw(creator, collection_name, token_name, property_version);
+            
+            list_token(account, token_id, price);
+        };
+    }
+
+    fun delist_token(account: &signer, token_id: TokenId) acquires MarketCap, ListTokenData {
         let marketplace_resource_account = get_marketplace_resource_account();
         let addr = signer::address_of(account);
 
         let list_token_data = borrow_global_mut<ListTokenData>(marketplace_resource_account);
-        
-        let token_id = token::create_token_id_raw(creator, collection_name, token_name, property_version);
+
         let token_data = table::borrow_mut(&mut list_token_data.listed_token, token_id);
 
         assert!(token_data.seller == addr, EINVALID_SELLER_ADDRESS);
@@ -180,16 +246,41 @@ module marketplace::marketplace {
         let token = option::extract(&mut token_data.token);
         token::deposit_token(account, token);
         let ListedItem { listing_id: _, token, seller: _, price: _, timestamp: _} = table::remove(&mut list_token_data.listed_token, token_id);
-        option::destroy_none(token)
+        option::destroy_none(token);
     }
 
-    public entry fun buy_token(account: &signer, creator: address, collection_name: String, token_name: String, property_version: u64) acquires MarketCap, Marketplace, ListTokenData {
+    public entry fun batch_delist_tokens(
+        account: &signer,
+        creators: vector<address>,
+        collection_names: vector<String>,
+        token_names: vector<String>,
+        property_versions: vector<u64>,
+    ) acquires MarketCap, ListTokenData {
+        assert!(
+            (vector::length(&creators) == vector::length(&collection_names)) &&
+            (vector::length(&collection_names) == vector::length(&token_names)) && 
+            (vector::length(&token_names) == vector::length(&property_versions)),
+            EVECTOR_LENGTH_MISMATCH
+        );
+
+        while (!vector::is_empty(&creators)) {
+            let creator = vector::pop_back(&mut creators);
+            let collection_name = vector::pop_back(&mut collection_names);
+            let token_name = vector::pop_back(&mut token_names);
+            let property_version = vector::pop_back(&mut property_versions);
+
+            let token_id = token::create_token_id_raw(creator, collection_name, token_name, property_version);
+            
+            delist_token(account, token_id);
+        };
+    }
+
+    fun buy_token(account: &signer, token_id: TokenId) acquires MarketCap, Marketplace, ListTokenData {
         let marketplace_resource_account = get_marketplace_resource_account();
         let addr = signer::address_of(account);
 
         let list_token_data = borrow_global_mut<ListTokenData>(marketplace_resource_account);
 
-        let token_id = token::create_token_id_raw(creator, collection_name, token_name, property_version);
         let token_data = table::borrow_mut(&mut list_token_data.listed_token, token_id);
 
         assert!(token_data.seller != addr, ETOKEN_SELLER_AND_BUYER_CANNOT_BE_SAME);
@@ -231,4 +322,31 @@ module marketplace::marketplace {
         let ListedItem { listing_id: _, token, seller: _, price: _, timestamp: _} = table::remove(&mut list_token_data.listed_token, token_id);
         option::destroy_none(token);
     }
+
+    public entry fun batch_buy_tokens(
+        account: &signer,
+        creators: vector<address>,
+        collection_names: vector<String>,
+        token_names: vector<String>,
+        property_versions: vector<u64>, 
+    ) acquires MarketCap, Marketplace, ListTokenData {
+        assert!(
+            (vector::length(&creators) == vector::length(&collection_names)) &&
+            (vector::length(&collection_names) == vector::length(&token_names)) && 
+            (vector::length(&token_names) == vector::length(&property_versions)),
+            EVECTOR_LENGTH_MISMATCH
+        );
+
+        while (!vector::is_empty(&creators)) {
+            let creator = vector::pop_back(&mut creators);
+            let collection_name = vector::pop_back(&mut collection_names);
+            let token_name = vector::pop_back(&mut token_names);
+            let property_version = vector::pop_back(&mut property_versions);
+
+            let token_id = token::create_token_id_raw(creator, collection_name, token_name, property_version);
+            
+            buy_token(account, token_id);
+        };
+    }
+
 }
