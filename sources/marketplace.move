@@ -20,6 +20,7 @@ module marketplace::marketplace {
     const EINVALID_SELLER_ADDRESS: u64 = 1;
     const ETOKEN_SELLER_AND_BUYER_CANNOT_BE_SAME: u64 = 2;
     const EVECTOR_LENGTH_MISMATCH: u64 = 3;
+    const EINSUFFICIENT_TOKEN_BALANCE: u64 = 4;
 
     struct MarketCap has key {
         cap: SignerCapability,
@@ -79,41 +80,38 @@ module marketplace::marketplace {
         timestamp: u64,
     }
 
-    // struct Auction has key {
-    //     auction: Table<TokenId, AuctionItem>,
-    //     auction_event: EventHandle<AuctionEvent>,
-    //     bid_event: EventHandle<BidEvent>,
-    // }
+    struct Auction has key {
+        auction: Table<TokenId, AuctionItem>,
+        auction_event: EventHandle<AuctionEvent>,
+        bid_event: EventHandle<BidEvent>,
+    }
 
-    // struct AuctionItem has store, drop {
-    //     min_sell_price: u64,
-    //     auction_id: u64,
-    //     token_owner: address,
-    //     timestamp: u64,
-    //     duration: u64,
-    //     starts_at: u64,
-    //     bidder_addresses: vector<address>,
-    //     highest_bidder: address,
-    //     bid_amounts: Table<address, u64>
-    // }
+    struct AuctionItem has store {
+        min_bid_amount: u64,
+        auction_id: u64,
+        token_owner: address,
+        token: Option<Token>,
+        auction_created_time: u64,
+        duration: u64,
+        bidder_addresses: vector<address>,
+        highest_bidder: address,
+        bid_amounts: Table<address, u64>
+    }
 
-    // struct AuctionEvent has store, drop {
-    //     token: TokenId,
-    //     auction_id: u64,
-    //     token_owner: address,
-    //     timestamp: u64,
-    //     starts_at: u64,
-    //     owner: address,
-    // }
+    struct AuctionEvent has store, drop {
+        token_id: TokenId,
+        auction_id: u64,
+        token_owner: address,
+        auction_created_time: u64,
+    }
 
-    // struct BidEvent has store, drop {
-    //     token: TokenId,
-    //     auction_id: u64,
-    //     timestamp: u64,
-    //     bid_amount: u64,
-    //     bidder: address,
-        
-    // }
+    struct BidEvent has store, drop {
+        token_id: TokenId,
+        auction_id: u64,
+        auction_created_time: u64,
+        bid_amount: u64,
+        bidder: address,   
+    }
 
     fun init_module(account: &signer) {
         let (resource_account_signer, resource_account_signer_cap) = account::create_resource_account(account, x"01");
@@ -135,6 +133,12 @@ module marketplace::marketplace {
             buy_token_event: account::new_event_handle<BuyEvent>(&resource_account_signer),
             change_price_event: account::new_event_handle<ChangePriceEvent>(&resource_account_signer),
         });
+
+        move_to(&resource_account_signer, Auction {
+            auction: table::new(),
+            auction_event: account::new_event_handle<AuctionEvent>(&resource_account_signer),
+            bid_event: account::new_event_handle<BidEvent>(&resource_account_signer),
+        })
     }
 
     fun get_marketplace_resource_account(): address acquires MarketCap {
@@ -349,4 +353,49 @@ module marketplace::marketplace {
         };
     }
 
+    public entry fun initiate_auction(
+        account: &signer,
+        creator: address,
+        collection_name: String,
+        token_name: String,
+        property_version: u64,
+        min_bid_amount: u64,
+        duration: u64,
+    ) acquires MarketCap, Auction {
+        let owner = signer::address_of(account);
+
+         let marketplace_signer_cap = borrow_global<MarketCap>(@marketplace);
+
+        let marketplace_signer = account::create_signer_with_capability(&marketplace_signer_cap.cap);
+        let marketplace_resource_account = signer::address_of(&marketplace_signer);
+
+        let auction_data = borrow_global_mut<Auction>(marketplace_resource_account);
+        let auction_created_time = timestamp::now_seconds();
+
+        let token_id = token::create_token_id_raw(creator, collection_name, token_name, property_version);
+        assert!(token::balance_of(owner, token_id) > 0, EINSUFFICIENT_TOKEN_BALANCE);
+        let token = token::withdraw_token(account, token_id, 1);
+
+        let guid = account::create_guid(&marketplace_signer);
+        let auction_id = guid::creation_num(&guid);
+
+        table::add(&mut auction_data.auction, token_id, AuctionItem {
+            min_bid_amount,
+            auction_id,
+            token_owner: owner,
+            token: option::some(token),
+            auction_created_time,
+            duration,
+            bidder_addresses: vector::empty(),
+            highest_bidder: @0x0,
+            bid_amounts: table::new(),
+        });
+
+        event::emit_event<AuctionEvent>(&mut auction_data.auction_event, AuctionEvent {
+            token_id,
+            auction_id,
+            token_owner: owner,
+            auction_created_time,
+        });
+    }
 }
