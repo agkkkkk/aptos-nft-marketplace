@@ -26,6 +26,8 @@ module marketplace::marketplace {
     const EBID_AMOUNT_INSUFFICIENT: u64 = 7;
     const ENOT_TOKEN_OWNER: u64 = 8;
     const EAUCTION_HAS_BIDDER: u64 = 9;
+    const ESELLER_CANNOT_BID: u64 = 10;
+    const EAUCTION_IS_LIVE: u64 = 11;
 
     struct MarketCap has key {
         cap: SignerCapability,
@@ -33,7 +35,7 @@ module marketplace::marketplace {
 
     struct Marketplace has key {
         owner: address,
-        fee: u64,
+        fee: u64, // fee denomination is 10000
         fund_address: address,    
     }
 
@@ -89,6 +91,7 @@ module marketplace::marketplace {
         auction: Table<TokenId, AuctionItem>,
         auction_event: EventHandle<AuctionEvent>,
         bid_event: EventHandle<BidEvent>,
+        claim_event: EventHandle<ClaimTokenEvent>,
     }
 
     struct AuctionItem has store {
@@ -121,6 +124,14 @@ module marketplace::marketplace {
         bid_time: u64,
     }
 
+    struct ClaimTokenEvent has store, drop {
+        token_id: TokenId,
+        auction_id: u64,
+        claim_time: u64,
+        bidder: address,
+        seller: address,
+    }
+
     fun init_module(account: &signer) {
         let (resource_account_signer, resource_account_signer_cap) = account::create_resource_account(account, x"01");
 
@@ -146,6 +157,7 @@ module marketplace::marketplace {
             auction: table::new(),
             auction_event: account::new_event_handle<AuctionEvent>(&resource_account_signer),
             bid_event: account::new_event_handle<BidEvent>(&resource_account_signer),
+            claim_event: account::new_event_handle<ClaimTokenEvent>(&resource_account_signer),
         })
     }
 
@@ -406,7 +418,68 @@ module marketplace::marketplace {
         });
     }
 
-    public entry fun cancel_auction(account: &signer, creator: address, collection_name: String, token_name: String, property_version: u64) acquires MarketCap, Auction {
+    public entry fun bid(
+        account: &signer, creator:
+        address, collection_name: String,
+        token_name: String,
+        property_version: u64,
+        bid_amount: u64
+    ) acquires MarketCap, Auction, AuctionLockedCoin {
+        let bidder_address = signer::address_of(account);
+        let market_cap = borrow_global<MarketCap>(@marketplace);
+
+        let marketplace_signer = account::create_signer_with_capability(&market_cap.cap);
+        let marketplace_resource_account = signer::address_of(&marketplace_signer);
+        
+        let token_id = token::create_token_id_raw(creator, collection_name, token_name, property_version);
+
+        let auction_data = borrow_global_mut<Auction>(marketplace_resource_account);
+
+        assert!(table::contains(&auction_data.auction, token_id), ETOKEN_NOT_INITIALIZED_FOR_AUCTION);
+
+        let auction_items = table::borrow_mut(&mut auction_data.auction, token_id);
+        assert!(auction_items.token_owner != bidder_address, ESELLER_CANNOT_BID);
+        assert!(auction_items.auction_created_time + auction_items.duration >= timestamp::now_seconds(), EAUCTION_TIME_EXPIRED);
+
+        assert!(bid_amount >= auction_items.min_bid_amount && bid_amount > auction_items.highest_bid, EBID_AMOUNT_INSUFFICIENT);
+
+        if (!exists<AuctionLockedCoin<AptosCoin>>(bidder_address)) {
+            move_to(account, AuctionLockedCoin<AptosCoin> {
+                locked_coin: table::new(),
+            });
+        };
+
+        if (auction_items.highest_bidder != @0x0) {
+            let previous_bid_data = borrow_global_mut<AuctionLockedCoin<AptosCoin>>(auction_items.highest_bidder);
+            let coin = table::remove(&mut previous_bid_data.locked_coin, token_id);
+
+            coin::deposit(auction_items.highest_bidder, coin);
+        };
+
+        auction_items.highest_bidder = bidder_address;
+        auction_items.highest_bid = bid_amount;
+
+        let locked_coin = coin::withdraw<AptosCoin>(account, bid_amount);
+
+        let auction_locked_coin = borrow_global_mut<AuctionLockedCoin<AptosCoin>>(bidder_address);
+        table::add(&mut auction_locked_coin.locked_coin, token_id, locked_coin);
+
+        event::emit_event(&mut auction_data.bid_event, BidEvent {
+            token_id,
+            auction_id: auction_items.auction_id,
+            bidder: bidder_address,
+            bid_amount,
+            bid_time: timestamp::now_seconds(),
+        });
+    }
+
+    public entry fun cancel_auction(
+        account: &signer,
+        creator: address,
+        collection_name: String,
+        token_name: String,
+        property_version: u64
+    ) acquires MarketCap, Auction {
         let marketplace_signer_cap = borrow_global<MarketCap>(@marketplace);
 
         let marketplace_signer = account::create_signer_with_capability(&marketplace_signer_cap.cap);
@@ -422,6 +495,71 @@ module marketplace::marketplace {
 
         let token = option::extract(&mut auction_item.token);
         token::deposit_token(account, token);
+
+        let AuctionItem {
+            min_bid_amount: _,
+            auction_id: _,
+            token_owner: _,
+            token,
+            auction_created_time: _,
+            duration: _,
+            highest_bidder: _,
+            highest_bid: _, 
+        } = table::remove(&mut auction_data.auction, token_id);
+        option::destroy_none(token);
+    }
+
+    public entry fun claim_auction_token(
+        account: &signer,
+        creator: address,
+        collection_name: String,
+        token_name: String,
+        property_version: u64
+    ) acquires MarketCap, Marketplace, Auction, AuctionLockedCoin {
+        let sender = signer::address_of(account);
+        let market_cap = borrow_global<MarketCap>(@marketplace);
+
+        let marketplace_signer = account::create_signer_with_capability(&market_cap.cap);
+        let marketplace_resource_account = signer::address_of(&marketplace_signer);
+
+        let token_id = token::create_token_id_raw(creator, collection_name, token_name, property_version);
+
+        let auction_data = borrow_global_mut<Auction>(marketplace_resource_account);
+        let auction_item = table::borrow_mut(&mut auction_data.auction, token_id);
+
+        assert!(auction_item.auction_created_time + auction_item.duration < timestamp::now_seconds(), EAUCTION_IS_LIVE);
+
+        let token = option::extract(&mut auction_item.token);
+        token::deposit_token(account, token);
+
+        let royalty = token::get_royalty(token_id);
+        let royalty_address = token::get_royalty_payee(&royalty);
+        let royalty_numerator = token::get_royalty_numerator(&royalty);
+        let royalty_denominator = token::get_royalty_denominator(&royalty);
+
+        let locked_coin_data = &mut borrow_global_mut<AuctionLockedCoin<AptosCoin>>(sender).locked_coin;
+        let locked_coin = table::remove(locked_coin_data, token_id);
+
+        let marketplace_data = borrow_global<Marketplace>(marketplace_resource_account);
+        let amount = coin::value(&locked_coin);
+
+        let fee = amount * marketplace_data.fee / 10000;
+
+        if (royalty_denominator > 0) {
+            let royalty_fee = amount * royalty_numerator / royalty_denominator;
+            coin::deposit(royalty_address, coin::extract(&mut locked_coin, royalty_fee));
+        };
+
+        coin::deposit(marketplace_data.fund_address, coin::extract(&mut locked_coin, fee));
+        coin::deposit(auction_item.token_owner, locked_coin);
+        
+        event::emit_event(&mut auction_data.claim_event, ClaimTokenEvent {
+            token_id,
+            auction_id: auction_item.auction_id,
+            claim_time: timestamp::now_seconds(),
+            bidder: sender,
+            seller: auction_item.token_owner,
+        });
 
         let AuctionItem {
             min_bid_amount: _,
