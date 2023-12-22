@@ -54,4 +54,4 @@ FUNCTION-ID:- <module_address>::<module_name>::<function_name>
 
 ```bash
 aptos move run --funtion-id <FUNCTION-ID> --args <ARG>
-```0392550f2cc8f687db3518f54c1b7b201d3ba00d3199f11d1ea6a3c336778e5f
+```
