@@ -3,6 +3,7 @@ module marketplace::marketplace {
     use std::signer;
     use std::string::String;
     use std::vector;
+    use std::error;
     use std::option::{Self, Option};
     
     use aptos_std::table::{Self, Table};
@@ -16,17 +17,29 @@ module marketplace::marketplace {
 
     use aptos_token::token::{Self, Token, TokenId};
 
-    const ENOT_OWNER: u64 = 0;
+    /// Invalid marketplace owner.
+    const ENOT_MARKETPLACE_OWNER: u64 = 0;
+    /// Invalid Seller address.
     const EINVALID_SELLER_ADDRESS: u64 = 1;
+    /// Token buyer and seller cannot be same.
     const ETOKEN_SELLER_AND_BUYER_CANNOT_BE_SAME: u64 = 2;
+    /// Provided vector arguments length must be same.
     const EVECTOR_LENGTH_MISMATCH: u64 = 3;
+    /// Account does not have enough token.
     const EINSUFFICIENT_TOKEN_BALANCE: u64 = 4;
+    /// An auction has not been initiated for the token.
     const ETOKEN_NOT_INITIALIZED_FOR_AUCTION: u64 = 5;
+    /// Auction has been expired.
     const EAUCTION_TIME_EXPIRED: u64 = 6;
+    /// Bid amount for the auction is insufficient.
     const EBID_AMOUNT_INSUFFICIENT: u64 = 7;
+    /// Caller is not token owner.
     const ENOT_TOKEN_OWNER: u64 = 8;
+    /// Auction cannot be cancelled, auction already has a bidder.
     const EAUCTION_HAS_BIDDER: u64 = 9;
+    /// Auction Initiator cannot bid in auction.
     const ESELLER_CANNOT_BID: u64 = 10;
+    /// Auction has not yet expired.
     const EAUCTION_IS_LIVE: u64 = 11;
 
     struct MarketCap has key {
@@ -169,21 +182,21 @@ module marketplace::marketplace {
 
     public entry fun change_marketplace_owner(account: &signer, new_owner: address) acquires MarketCap, Marketplace {
         let marketplace_data = borrow_global_mut<Marketplace>(get_marketplace_resource_account());
-        assert!(marketplace_data.owner == signer::address_of(account), ENOT_OWNER);
+        assert!(marketplace_data.owner == signer::address_of(account), error::permission_denied(ENOT_MARKETPLACE_OWNER));
 
         marketplace_data.owner = new_owner;
     }
 
     public entry fun update_marketplace_fee(account: &signer, fee: u64) acquires MarketCap, Marketplace {
         let marketplace_data = borrow_global_mut<Marketplace>(get_marketplace_resource_account());
-        assert!(marketplace_data.owner == signer::address_of(account), ENOT_OWNER);
+        assert!(marketplace_data.owner == signer::address_of(account), error::permission_denied(ENOT_MARKETPLACE_OWNER));
 
         marketplace_data.fee = fee;
     }
 
     public entry fun update_treasury_address(account: &signer, treasury_address: address) acquires MarketCap, Marketplace {
         let marketplace_data = borrow_global_mut<Marketplace>(get_marketplace_resource_account());
-        assert!(marketplace_data.owner == signer::address_of(account), ENOT_OWNER);
+        assert!(marketplace_data.owner == signer::address_of(account), error::permission_denied(ENOT_MARKETPLACE_OWNER));
 
         marketplace_data.fund_address = treasury_address;
     }
@@ -233,7 +246,7 @@ module marketplace::marketplace {
             (vector::length(&collection_names) == vector::length(&token_names)) && 
             (vector::length(&token_names) == vector::length(&property_versions)) &&
             (vector::length(&property_versions) == vector::length(&prices)),
-            EVECTOR_LENGTH_MISMATCH
+            error::invalid_argument(EVECTOR_LENGTH_MISMATCH)
         );
 
         while (!vector::is_empty(&creators)) {
@@ -257,7 +270,7 @@ module marketplace::marketplace {
 
         let token_data = table::borrow_mut(&mut list_token_data.listed_token, token_id);
 
-        assert!(token_data.seller == addr, EINVALID_SELLER_ADDRESS);
+        assert!(token_data.seller == addr, error::unauthenticated(EINVALID_SELLER_ADDRESS));
 
         event::emit_event<DelistEvent>(&mut list_token_data.delist_token_event, DelistEvent {
             listing_id: token_data.listing_id,
@@ -284,7 +297,7 @@ module marketplace::marketplace {
             (vector::length(&creators) == vector::length(&collection_names)) &&
             (vector::length(&collection_names) == vector::length(&token_names)) && 
             (vector::length(&token_names) == vector::length(&property_versions)),
-            EVECTOR_LENGTH_MISMATCH
+            error::invalid_argument(EVECTOR_LENGTH_MISMATCH)
         );
 
         while (!vector::is_empty(&creators)) {
@@ -307,7 +320,7 @@ module marketplace::marketplace {
 
         let token_data = table::borrow_mut(&mut list_token_data.listed_token, token_id);
 
-        assert!(token_data.seller != addr, ETOKEN_SELLER_AND_BUYER_CANNOT_BE_SAME);
+        assert!(token_data.seller != addr, error::internal(ETOKEN_SELLER_AND_BUYER_CANNOT_BE_SAME));
 
         let royalty = token::get_royalty(token_id);
         let royalty_address = token::get_royalty_payee(&royalty);
@@ -358,7 +371,7 @@ module marketplace::marketplace {
             (vector::length(&creators) == vector::length(&collection_names)) &&
             (vector::length(&collection_names) == vector::length(&token_names)) && 
             (vector::length(&token_names) == vector::length(&property_versions)),
-            EVECTOR_LENGTH_MISMATCH
+            error::invalid_argument(EVECTOR_LENGTH_MISMATCH)
         );
 
         while (!vector::is_empty(&creators)) {
@@ -393,7 +406,7 @@ module marketplace::marketplace {
         let auction_created_time = timestamp::now_seconds();
 
         let token_id = token::create_token_id_raw(creator, collection_name, token_name, property_version);
-        assert!(token::balance_of(owner, token_id) > 0, EINSUFFICIENT_TOKEN_BALANCE);
+        assert!(token::balance_of(owner, token_id) > 0, error::internal(EINSUFFICIENT_TOKEN_BALANCE));
         let token = token::withdraw_token(account, token_id, 1);
 
         let guid = account::create_guid(&marketplace_signer);
@@ -435,13 +448,13 @@ module marketplace::marketplace {
 
         let auction_data = borrow_global_mut<Auction>(marketplace_resource_account);
 
-        assert!(table::contains(&auction_data.auction, token_id), ETOKEN_NOT_INITIALIZED_FOR_AUCTION);
+        assert!(table::contains(&auction_data.auction, token_id), error::internal(ETOKEN_NOT_INITIALIZED_FOR_AUCTION));
 
         let auction_items = table::borrow_mut(&mut auction_data.auction, token_id);
         assert!(auction_items.token_owner != bidder_address, ESELLER_CANNOT_BID);
-        assert!(auction_items.auction_created_time + auction_items.duration >= timestamp::now_seconds(), EAUCTION_TIME_EXPIRED);
+        assert!(auction_items.auction_created_time + auction_items.duration >= timestamp::now_seconds(), error::internal(EAUCTION_TIME_EXPIRED));
 
-        assert!(bid_amount >= auction_items.min_bid_amount && bid_amount > auction_items.highest_bid, EBID_AMOUNT_INSUFFICIENT);
+        assert!(bid_amount >= auction_items.min_bid_amount && bid_amount > auction_items.highest_bid, error::internal(EBID_AMOUNT_INSUFFICIENT));
 
         if (!exists<AuctionLockedCoin<AptosCoin>>(bidder_address)) {
             move_to(account, AuctionLockedCoin<AptosCoin> {
@@ -490,8 +503,8 @@ module marketplace::marketplace {
         let token_id = token::create_token_id_raw(creator, collection_name, token_name, property_version);
         let auction_item = table::borrow_mut(&mut auction_data.auction, token_id);
 
-        assert!(auction_item.token_owner == signer::address_of(account), ENOT_TOKEN_OWNER);
-        assert!(auction_item.highest_bidder == @0x0, EAUCTION_HAS_BIDDER);
+        assert!(auction_item.token_owner == signer::address_of(account), error::unauthenticated(ENOT_TOKEN_OWNER));
+        assert!(auction_item.highest_bidder == @0x0, error::internal(EAUCTION_HAS_BIDDER));
 
         let token = option::extract(&mut auction_item.token);
         token::deposit_token(account, token);
@@ -527,7 +540,7 @@ module marketplace::marketplace {
         let auction_data = borrow_global_mut<Auction>(marketplace_resource_account);
         let auction_item = table::borrow_mut(&mut auction_data.auction, token_id);
 
-        assert!(auction_item.auction_created_time + auction_item.duration < timestamp::now_seconds(), EAUCTION_IS_LIVE);
+        assert!(auction_item.auction_created_time + auction_item.duration < timestamp::now_seconds(), error::internal(EAUCTION_IS_LIVE));
 
         let token = option::extract(&mut auction_item.token);
         token::deposit_token(account, token);
