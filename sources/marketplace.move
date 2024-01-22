@@ -17,6 +17,9 @@ module marketplace::marketplace {
 
     use aptos_token::token::{Self, Token, TokenId};
 
+    #[test_only]
+    use std::debug;
+
     /// Invalid marketplace owner.
     const ENOT_MARKETPLACE_OWNER: u64 = 0;
     /// Invalid Seller address.
@@ -585,5 +588,86 @@ module marketplace::marketplace {
             highest_bid: _, 
         } = table::remove(&mut auction_data.auction, token_id);
         option::destroy_none(token);
+    }
+    
+    #[test_only(marketplace=@marketplace)]
+    fun test_setup(marketplace: &signer) {
+        account::create_account_for_test(signer::address_of(marketplace));
+        init_module(marketplace);
+    }
+
+    #[test(marketplace=@marketplace)]
+    fun test_init_module(marketplace: &signer) {
+        test_setup(marketplace);
+    }
+    
+    #[test(marketplace=@marketplace)]
+    fun test_initialized_value(marketplace: &signer) acquires MarketCap, Marketplace {
+        test_init_module(marketplace);
+        let marketplace_resource_account = get_marketplace_resource_account();
+        let marketplace_data = borrow_global<Marketplace>(marketplace_resource_account);
+
+        debug::print(marketplace_data);
+
+        assert!(marketplace_data.owner == @owner, 0);
+        assert!(marketplace_data.fund_address == @treasury, 0);
+        assert!(marketplace_data.fee == 500, 0);
+    }
+
+    #[test(marketplace=@marketplace, owner=@owner)]
+    fun test_change_marketplace_owner(marketplace: &signer, owner: &signer) acquires MarketCap, Marketplace {
+        test_init_module(marketplace);
+
+        let new_owner = @0x4aa3ba60c04075b60f4493a8991edbae91548c2fb99a781678e6c2ca86f42118;
+
+        change_marketplace_owner(owner, new_owner);
+
+        let marketplace_resource_account = get_marketplace_resource_account();
+        let marketplace_data = borrow_global<Marketplace>(marketplace_resource_account);
+
+        assert!(marketplace_data.owner == new_owner, 0);
+    }
+
+    #[test(marketplace=@marketplace, owner=@0x4aa3ba60c04075b60f4493a8991edbae91548c2fb99a781678e6c2ca86f42118)]
+    #[expected_failure(abort_code=327680, location=Self)]
+    fun test_change_marketplace_owner_failure_not_owner(marketplace: &signer, owner: &signer) acquires MarketCap, Marketplace {
+        test_init_module(marketplace);
+
+        let new_owner = @0x4aa3ba60c04075b60f4493a8991edbae91548c2fb99a781678e6c2ca86f42118;
+
+        change_marketplace_owner(owner, new_owner);
+
+        let marketplace_resource_account = get_marketplace_resource_account();
+        let marketplace_data = borrow_global<Marketplace>(marketplace_resource_account);
+
+        assert!(marketplace_data.owner == new_owner, 0);
+    }
+
+    #[test(marketplace=@marketplace, owner=@owner, new_owner=@0x4aa3ba60c04075b60f4493a8991edbae91548c2fb99a781678e6c2ca86f42118)]
+    fun test_update_treasury_address(marketplace: &signer, owner: &signer, new_owner: &signer) acquires MarketCap, Marketplace {
+        test_change_marketplace_owner(marketplace, owner);
+
+        let treasury_address = @0x5439217e20f54dcaf4c138262f2e1e04541e3ae81f238f8db2520da214976fcb;
+
+        update_treasury_address(new_owner, treasury_address);
+
+        let marketplace_resource_account = get_marketplace_resource_account();
+        let marketplace_data = borrow_global<Marketplace>(marketplace_resource_account);
+
+        assert!(marketplace_data.fund_address == treasury_address, 0);
+    }
+    
+    #[test(marketplace=@marketplace, owner=@owner, new_owner=@0x4aa3ba60c04075b60f4493a8991edbae91548c2fb99a781678e6c2ca86f42118)]
+    fun test_update_marketplace_fee(marketplace: &signer, owner: &signer, new_owner: &signer) acquires MarketCap, Marketplace {
+        test_update_treasury_address(marketplace, owner, new_owner);
+
+        let fee = 250;
+
+        update_marketplace_fee(new_owner, fee);
+
+        let marketplace_resource_account = get_marketplace_resource_account();
+        let marketplace_data = borrow_global<Marketplace>(marketplace_resource_account);
+
+        assert!(marketplace_data.fee == fee, 0);
     }
 }
